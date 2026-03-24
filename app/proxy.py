@@ -46,6 +46,7 @@ async def get_client() -> httpx.AsyncClient:
             ),
             follow_redirects=True,
             http2=True,
+            trust_env=False,
         )
     return _client
 
