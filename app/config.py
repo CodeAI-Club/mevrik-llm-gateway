@@ -1,21 +1,52 @@
 """Server-level settings from environment variables."""
 
+from __future__ import annotations
+
+from pathlib import Path
+from typing import List
+
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Service identity
+    service_name: str = "LLM Gateway"
+    service_version: str = "1.0.0"
+    service_description: str = "OpenAI-compatible gateway for vLLM backends"
+
+    # Auth
     api_key: str = ""
+
+    # Server
     host: str = "0.0.0.0"
     port: int = 8000
     workers: int = 4
     log_level: str = "info"
+
+    # CORS
+    allowed_origins: str = "*"
+
+    # Proxy tuning
     request_timeout: int = 300
     max_connections: int = 500
-    models_path: str = "models.json"
+
+    # Data paths
+    data_dir: str = "data"
+    models_path: str = "data/models.json"
+    stats_path: str = "data/stats.json"
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
 
+    @property
+    def cors_origins(self) -> List[str]:
+        return [o.strip() for o in self.allowed_origins.split(",")]
+
+    def ensure_dirs(self):
+        """Create data directories on startup."""
+        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+
 
 settings = Settings()
+settings.ensure_dirs()
