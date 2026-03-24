@@ -3,27 +3,6 @@
 OpenAI-compatible reverse proxy for multiple vLLM backends. Models are stored in `models.json` and can be added/removed
 at runtime via API.
 
-## Project Structure
-
-```
-llm-gateway/
-├── app/
-│   ├── main.py          # App factory, lifespan, middleware
-│   ├── config.py        # .env settings (API_KEY, PORT, etc.)
-│   ├── registry.py      # Model registry — reads/writes models.json
-│   ├── proxy.py         # Async httpx client for vLLM backends
-│   ├── deps.py          # Auth & model resolution dependencies
-│   └── routers/
-│       ├── health.py    # GET /health
-│       ├── models.py    # CRUD: GET/POST/PATCH/DELETE /v1/models
-│       └── openai.py    # Proxy: chat, completions, embeddings, rerank
-├── models.json          # Dynamic model registry (editable via API)
-├── .env                 # Server settings & API key
-├── Dockerfile
-├── run.py
-└── requirements.txt
-```
-
 ## Quick Start
 
 ### Docker
