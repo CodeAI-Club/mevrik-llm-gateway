@@ -1,10 +1,18 @@
-"""Benchmark & stats endpoints for model performance testing."""
+"""
+Benchmark & stats endpoints.
+
+Load tests run as background tasks — the endpoint returns a job_id
+immediately, and you poll GET /v1/jobs/{job_id} for results.
+This avoids nginx/proxy gateway timeouts on long-running tests.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import time
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.deps import verify_api_key
 from app.proxy import forward, forward_stream
-from app.registry import ModelEntry, registry
+from app.registry import registry
 from app.stats import RequestStat, tracker
 
 logger = logging.getLogger("llm-gateway")
@@ -20,6 +28,21 @@ logger = logging.getLogger("llm-gateway")
 router = APIRouter(prefix="/v1", tags=["benchmark"], dependencies=[Depends(verify_api_key)])
 
 _TEST_PROMPT = "Say 'hello' in one sentence."
+
+# ---------------------------------------------------------------------------
+# Job store (in-memory, capped)
+# ---------------------------------------------------------------------------
+_MAX_JOBS = 200
+
+_jobs: dict[str, dict] = {}
+
+
+def _store_job(job_id: str, data: dict):
+    _jobs[job_id] = data
+    # Evict oldest if over cap
+    if len(_jobs) > _MAX_JOBS:
+        oldest = next(iter(_jobs))
+        _jobs.pop(oldest, None)
 
 
 # ---------------------------------------------------------------------------
@@ -38,11 +61,11 @@ class LoadTestRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 1. Test single model performance
+# 1. Test single model (quick, inline response)
 # ---------------------------------------------------------------------------
 @router.post("/models/{model_id}/test")
 async def test_model(model_id: str, body: TestRequest):
-    """Send a single test request and measure latency, TTFB, tokens/sec."""
+    """Single request — measure latency, TTFB, tokens/sec."""
     entry = registry.get(model_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
@@ -70,12 +93,9 @@ async def test_model(model_id: str, body: TestRequest):
 
     total_ms = (time.perf_counter() - t_start) * 1000
     raw = b"".join(chunks).decode(errors="replace")
-
-    # Parse token count from SSE chunks
     tokens_out = _count_tokens_from_sse(raw)
     tps = (tokens_out / total_ms) * 1000 if total_ms > 0 and tokens_out > 0 else 0
 
-    # Record stat
     stat = RequestStat(
         model_id=model_id,
         tokens_in=len(body.prompt.split()),
@@ -96,19 +116,39 @@ async def test_model(model_id: str, body: TestRequest):
 
 
 # ---------------------------------------------------------------------------
-# 2. Load test model with concurrency
+# 2. Load test (background job — returns immediately)
 # ---------------------------------------------------------------------------
-@router.post("/models/{model_id}/loadtest")
+@router.post("/models/{model_id}/loadtest", status_code=202)
 async def load_test_model(model_id: str, body: LoadTestRequest):
-    """Fire concurrent requests to stress-test a model backend."""
+    """Start a load test in the background. Returns a job_id to poll."""
     entry = registry.get(model_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
-    sem = asyncio.Semaphore(body.concurrency)
-    results: list[dict] = []
+    job_id = str(uuid.uuid4())[:8]
+    _store_job(job_id, {
+        "job_id": job_id,
+        "model": model_id,
+        "status": "running",
+        "config": body.model_dump(),
+        "started_at": time.time(),
+    })
 
-    async def _single(idx: int):
+    # Fire and forget — runs in the event loop background
+    asyncio.create_task(_run_loadtest(job_id, entry, body))
+
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "poll_url": f"/v1/jobs/{job_id}",
+    }
+
+
+async def _run_loadtest(job_id: str, entry, body: LoadTestRequest):
+    """Execute load test concurrently, store results in job store."""
+    sem = asyncio.Semaphore(body.concurrency)
+
+    async def _single(idx: int) -> dict:
         async with sem:
             payload = {
                 "model": entry.backend_model,
@@ -124,7 +164,7 @@ async def load_test_model(model_id: str, body: LoadTestRequest):
                 tokens_out = usage.get("completion_tokens", 0)
 
                 stat = RequestStat(
-                    model_id=model_id,
+                    model_id=entry.id,
                     tokens_in=usage.get("prompt_tokens", 0),
                     tokens_out=tokens_out,
                     latency_ms=round(elapsed, 2),
@@ -132,52 +172,79 @@ async def load_test_model(model_id: str, body: LoadTestRequest):
                 )
                 await tracker.record("__loadtest__", stat)
 
-                return {
-                    "index": idx,
-                    "status": resp.status_code,
-                    "latency_ms": round(elapsed, 2),
-                    "tokens_out": tokens_out,
-                }
+                return {"index": idx, "status": resp.status_code, "latency_ms": round(elapsed, 2),
+                        "tokens_out": tokens_out}
             except Exception as exc:
                 elapsed = (time.perf_counter() - t0) * 1000
-                return {
-                    "index": idx,
-                    "status": "error",
-                    "latency_ms": round(elapsed, 2),
-                    "error": str(exc),
-                }
+                return {"index": idx, "status": "error", "latency_ms": round(elapsed, 2), "error": str(exc)}
 
-    tasks = [_single(i) for i in range(body.total_requests)]
-    t_total_start = time.perf_counter()
-    results = await asyncio.gather(*tasks)
-    total_wall_ms = (time.perf_counter() - t_total_start) * 1000
+    try:
+        tasks = [_single(i) for i in range(body.total_requests)]
+        t_wall = time.perf_counter()
+        results = await asyncio.gather(*tasks)
+        total_wall_ms = (time.perf_counter() - t_wall) * 1000
 
-    successes = [r for r in results if r.get("status") == 200]
-    failures = [r for r in results if r.get("status") != 200]
-    latencies = sorted(r["latency_ms"] for r in successes) if successes else [0]
-    n = len(successes)
+        successes = [r for r in results if r.get("status") == 200]
+        failures = [r for r in results if r.get("status") != 200]
+        latencies = sorted(r["latency_ms"] for r in successes) if successes else [0]
+        n = len(successes)
 
-    return {
-        "model": model_id,
-        "config": {
-            "concurrency": body.concurrency,
-            "total_requests": body.total_requests,
-        },
-        "wall_time_ms": round(total_wall_ms, 2),
-        "succeeded": n,
-        "failed": len(failures),
-        "avg_latency_ms": round(sum(latencies) / n, 2) if n else 0,
-        "min_latency_ms": round(latencies[0], 2) if n else 0,
-        "max_latency_ms": round(latencies[-1], 2) if n else 0,
-        "p50_latency_ms": round(latencies[n // 2], 2) if n else 0,
-        "p95_latency_ms": round(latencies[int(n * 0.95)], 2) if n else 0,
-        "requests_per_sec": round((n / total_wall_ms) * 1000, 2) if total_wall_ms > 0 else 0,
-        "results": results,
-    }
+        def _pct(arr: list, p: float) -> float:
+            return round(arr[min(int(len(arr) * p), len(arr) - 1)], 2) if arr else 0
+
+        _store_job(job_id, {
+            "job_id": job_id,
+            "model": entry.id,
+            "status": "completed",
+            "config": body.model_dump(),
+            "wall_time_ms": round(total_wall_ms, 2),
+            "succeeded": n,
+            "failed": len(failures),
+            "avg_latency_ms": round(sum(latencies) / n, 2) if n else 0,
+            "min_latency_ms": round(latencies[0], 2) if n else 0,
+            "max_latency_ms": round(latencies[-1], 2) if n else 0,
+            "p50_latency_ms": _pct(latencies, 0.50),
+            "p95_latency_ms": _pct(latencies, 0.95),
+            "p99_latency_ms": _pct(latencies, 0.99),
+            "requests_per_sec": round((n / total_wall_ms) * 1000, 2) if total_wall_ms > 0 else 0,
+            "results": list(results),
+            "completed_at": time.time(),
+        })
+        logger.info("Load test %s completed: %d/%d succeeded", job_id, n, body.total_requests)
+
+    except Exception as exc:
+        _store_job(job_id, {
+            "job_id": job_id,
+            "model": entry.id,
+            "status": "failed",
+            "error": str(exc),
+            "completed_at": time.time(),
+        })
+        logger.error("Load test %s failed: %s", job_id, exc)
 
 
 # ---------------------------------------------------------------------------
-# 3. Per-user token speed stats
+# 3. Poll job results
+# ---------------------------------------------------------------------------
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    """Poll load test job status and results."""
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    return job
+
+
+@router.get("/jobs")
+async def list_jobs():
+    """List all jobs (most recent first)."""
+    items = list(_jobs.values())
+    items.reverse()
+    return {"jobs": items}
+
+
+# ---------------------------------------------------------------------------
+# 4. Per-user token speed stats
 # ---------------------------------------------------------------------------
 @router.get("/stats")
 async def get_stats(
@@ -212,8 +279,6 @@ async def clear_stats(
 # ---------------------------------------------------------------------------
 def _count_tokens_from_sse(raw: str) -> int:
     """Best-effort token count from SSE stream chunks."""
-    import json as _json
-
     count = 0
     for line in raw.split("\n"):
         line = line.strip()
@@ -224,16 +289,13 @@ def _count_tokens_from_sse(raw: str) -> int:
             break
         try:
             obj = _json.loads(data_str)
-            # Check usage field first (vLLM includes it in final chunk)
             usage = obj.get("usage")
             if usage and usage.get("completion_tokens"):
                 return usage["completion_tokens"]
-            # Otherwise count content deltas
             for choice in obj.get("choices", []):
                 delta = choice.get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    count += 1  # approximate: 1 chunk ≈ 1 token
+                if delta.get("content"):
+                    count += 1
         except (_json.JSONDecodeError, TypeError):
             continue
     return count

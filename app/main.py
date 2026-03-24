@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
         title=settings.service_name,
         version=settings.service_version,
         description=settings.service_description,
+        root_path=settings.root_path,
         lifespan=lifespan,
     )
 

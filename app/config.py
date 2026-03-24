@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Service identity
     service_name: str = "LLM Gateway"
-    service_version: str = "1.0.0"
+    service_version: str = "0.0.0"
     service_description: str = "OpenAI-compatible gateway for vLLM backends"
 
     # Auth
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     port: int = 8000
     workers: int = 4
     log_level: str = "info"
+    root_path: str = ""
 
     # CORS
     allowed_origins: str = "*"
