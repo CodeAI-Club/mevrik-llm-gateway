@@ -11,5 +11,6 @@ if __name__ == "__main__":
         port=settings.port,
         workers=settings.workers,
         log_level=settings.log_level,
+        loop="uvloop",
         access_log=True,
     )
