@@ -1,15 +1,24 @@
-"""OpenAI-compatible proxy endpoints — forwards to vLLM backends."""
+"""OpenAI-compatible proxy endpoints — forwards to vLLM backends.
+
+Pure pass-through proxy. Every endpoint:
+ 1. Resolves the gateway model-id → backend entry + rewritten payload.
+ 2. Proxies the request via forward_safe (non-streaming) or
+    forward_stream (streaming SSE).
+ 3. Records per-user stats (latency, tokens, throughput).
+ 4. Returns the backend response as-is — errors included.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.deps import resolve_model, verify_api_key
-from app.proxy import forward, forward_stream
+from app.proxy import ProxyResult, forward_safe, forward_stream
 from app.registry import ModelEntry
 from app.schemas import (
     ChatCompletionRequest,
@@ -18,6 +27,7 @@ from app.schemas import (
     RerankRequest,
     ScoreRequest,
 )
+from app.stats import RequestStat, tracker
 
 logger = logging.getLogger("llm-gateway")
 
@@ -31,80 +41,198 @@ _SSE_HEADERS = {
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _user_key(request: Request) -> str:
+    """Extract a user identifier from the Authorization header for stats."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:]
+        return f"key_...{token[-8:]}" if len(token) > 8 else token
+    return "__anonymous__"
+
+
+def _error_response(result: ProxyResult) -> JSONResponse:
+    """Build a JSON error response from a failed ProxyResult."""
+    # If backend returned valid JSON error body, pass it through as-is
+    if result.body is not None:
+        return JSONResponse(content=result.body, status_code=result.status_code)
+
+    # Otherwise build a structured error
+    return JSONResponse(
+        content={
+            "error": {
+                "message": result.error or f"Backend returned {result.status_code}",
+                "type": "proxy_error",
+                "code": result.status_code,
+            }
+        },
+        status_code=result.status_code,
+    )
+
+
+def _extract_usage(data: dict | None) -> tuple[int, int]:
+    """Pull (prompt_tokens, completion_tokens) from a response body."""
+    if not data or not isinstance(data, dict):
+        return 0, 0
+    usage = data.get("usage") or {}
+    return usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+
+async def _record_stat(
+        user_key: str,
+        model_id: str,
+        tokens_in: int,
+        tokens_out: int,
+        latency_ms: float,
+        ttfb_ms: float = 0.0,
+):
+    """Fire-and-forget stat recording."""
+    try:
+        stat = RequestStat(
+            model_id=model_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=round(latency_ms, 2),
+            ttfb_ms=round(ttfb_ms or latency_ms, 2),
+        )
+        await tracker.record(user_key, stat)
+    except Exception as exc:
+        logger.debug("Stats record failed (non-critical): %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Non-streaming proxy
+# ---------------------------------------------------------------------------
+async def _proxy_json(
+        request: Request,
+        model: ModelEntry,
+        path: str,
+        payload: dict,
+) -> JSONResponse:
+    """Proxy a non-streaming request, record stats, return response as-is."""
+    user = _user_key(request)
+    t0 = time.perf_counter()
+
+    result = await forward_safe(model, path, payload)
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    if not result.ok:
+        logger.warning(
+            "Proxy error [%s] %s → %d (%s) %.0fms",
+            model.id, path, result.status_code,
+            result.error or "backend error", elapsed_ms,
+        )
+        return _error_response(result)
+
+    tokens_in, tokens_out = _extract_usage(result.body)
+    await _record_stat(user, model.id, tokens_in, tokens_out, elapsed_ms)
+
+    return JSONResponse(content=result.body, status_code=result.status_code)
+
+
+# ---------------------------------------------------------------------------
+# Streaming proxy
+# ---------------------------------------------------------------------------
+async def _proxy_stream(
+        request: Request,
+        model: ModelEntry,
+        path: str,
+        payload: dict,
+):
+    """Proxy a streaming SSE request, wrap errors into SSE events."""
+    user = _user_key(request)
+    t0 = time.perf_counter()
+    first_chunk = True
+    ttfb_ms = 0.0
+    chunk_count = 0
+
+    try:
+        async for chunk in forward_stream(model, path, payload):
+            if first_chunk:
+                ttfb_ms = (time.perf_counter() - t0) * 1000
+                first_chunk = False
+            chunk_count += 1
+            yield chunk
+
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.error(
+            "Stream error [%s] %s after %.0fms (%d chunks): %s",
+            model.id, path, elapsed_ms, chunk_count, exc,
+        )
+        err = json.dumps({
+            "error": {
+                "message": str(exc),
+                "type": "proxy_error",
+                "code": 502,
+            }
+        })
+        yield f"data: {err}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+        return
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    await _record_stat(user, model.id, 0, chunk_count, elapsed_ms, ttfb_ms)
+
+
+# ---------------------------------------------------------------------------
 # Chat completions
 # ---------------------------------------------------------------------------
 @router.post("/chat/completions")
-async def chat_completions(body: ChatCompletionRequest):
+async def chat_completions(body: ChatCompletionRequest, request: Request):
     model, payload = resolve_model(body.model_dump(exclude_none=True))
 
     if payload.get("stream"):
         return StreamingResponse(
-            _safe_stream(model, "/chat/completions", payload),
+            _proxy_stream(request, model, "/chat/completions", payload),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
 
-    resp = await forward(model, "/chat/completions", payload)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    return await _proxy_json(request, model, "/chat/completions", payload)
 
 
 # ---------------------------------------------------------------------------
 # Completions
 # ---------------------------------------------------------------------------
 @router.post("/completions")
-async def completions(body: CompletionRequest):
+async def completions(body: CompletionRequest, request: Request):
     model, payload = resolve_model(body.model_dump(exclude_none=True))
 
     if payload.get("stream"):
         return StreamingResponse(
-            _safe_stream(model, "/completions", payload),
+            _proxy_stream(request, model, "/completions", payload),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
 
-    resp = await forward(model, "/completions", payload)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    return await _proxy_json(request, model, "/completions", payload)
 
 
 # ---------------------------------------------------------------------------
 # Embeddings
 # ---------------------------------------------------------------------------
 @router.post("/embeddings")
-async def embeddings(body: EmbeddingRequest):
+async def embeddings(body: EmbeddingRequest, request: Request):
     model, payload = resolve_model(body.model_dump(exclude_none=True))
-
-    resp = await forward(model, "/embeddings", payload)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    return await _proxy_json(request, model, "/embeddings", payload)
 
 
 # ---------------------------------------------------------------------------
-# Rerank / Score
+# Rerank
 # ---------------------------------------------------------------------------
 @router.post("/rerank")
-async def rerank(body: RerankRequest):
+async def rerank(body: RerankRequest, request: Request):
     model, payload = resolve_model(body.model_dump(exclude_none=True))
-
-    resp = await forward(model, "/rerank", payload)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    return await _proxy_json(request, model, "/rerank", payload)
 
 
+# ---------------------------------------------------------------------------
+# Score
+# ---------------------------------------------------------------------------
 @router.post("/score")
-async def score(body: ScoreRequest):
+async def score(body: ScoreRequest, request: Request):
     model, payload = resolve_model(body.model_dump(exclude_none=True))
-
-    resp = await forward(model, "/score", payload)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
-
-
-# ---------------------------------------------------------------------------
-# Streaming helper
-# ---------------------------------------------------------------------------
-async def _safe_stream(model: ModelEntry, path: str, body: dict):
-    try:
-        async for chunk in forward_stream(model, path, body):
-            yield chunk
-    except Exception as exc:
-        logger.error("Stream error [%s]: %s", model.id, exc)
-        err = json.dumps({"error": {"message": str(exc), "type": "proxy_error"}})
-        yield f"data: {err}\n\n".encode()
-        yield b"data: [DONE]\n\n"
+    return await _proxy_json(request, model, "/score", payload)
