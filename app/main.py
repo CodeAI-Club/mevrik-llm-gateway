@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.proxy import close_client
 from app.registry import registry
-from app.routers import benchmark, health, models, openai
+from app.routers import benchmark, health, models, openai, rerank
 from app.stats import tracker
 
 logging.basicConfig(
@@ -25,7 +25,6 @@ logger = logging.getLogger("llm-gateway")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ... (Keep existing lifespan code) ...
     logger.info(
         "%s v%s starting — %d model(s)",
         settings.service_name,
@@ -48,11 +47,10 @@ def create_app() -> FastAPI:
         description=settings.service_description,
         root_path=settings.root_path,
         lifespan=lifespan,
-        docs_url=None,  # <-- Disable default CDN docs
-        redoc_url=None,  # <-- Disable default CDN redoc (optional)
+        docs_url=None,
+        redoc_url=None,
     )
 
-    # <-- Mount the local static files directory
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     app.add_middleware(
@@ -66,9 +64,9 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(models.router)
     app.include_router(openai.router)
+    app.include_router(rerank.router)  # <-- dedicated rerank + score
     app.include_router(benchmark.router)
 
-    # <-- Create custom offline docs route
     @app.get("/docs", include_in_schema=False)
     async def custom_swagger_ui_html():
         return get_swagger_ui_html(

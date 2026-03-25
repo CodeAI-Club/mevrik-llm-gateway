@@ -2,10 +2,13 @@
 
 Pure pass-through proxy. Every endpoint:
  1. Resolves the gateway model-id → backend entry + rewritten payload.
- 2. Proxies the request via forward_safe (non-streaming) or
+ 2. Validates the model type matches the endpoint.
+ 3. Proxies the request via forward_safe (non-streaming) or
     forward_stream (streaming SSE).
- 3. Records per-user stats (latency, tokens, throughput).
- 4. Returns the backend response as-is — errors included.
+ 4. Records per-user stats (latency, tokens, throughput).
+ 5. Returns the backend response as-is — errors included.
+
+Note: /rerank and /score are handled by app.routers.rerank.
 """
 
 from __future__ import annotations
@@ -24,8 +27,6 @@ from app.schemas import (
     ChatCompletionRequest,
     CompletionRequest,
     EmbeddingRequest,
-    RerankRequest,
-    ScoreRequest,
 )
 from app.stats import RequestStat, tracker
 
@@ -57,12 +58,7 @@ _BATCH_SIZE_HINTS = ("too large", "batch size", "max_num_batched_tokens", "too l
 
 
 def _error_response(result: ProxyResult) -> JSONResponse:
-    """Build a JSON error response from a failed ProxyResult.
-
-    If the backend error looks like a batch/token-size issue, enrich the
-    response with actionable guidance so the caller knows what to fix.
-    """
-    # Extract the raw error message from wherever vLLM put it
+    """Build a JSON error response from a failed ProxyResult."""
     raw_msg = ""
     if result.body and isinstance(result.body, dict):
         err_obj = result.body.get("error", result.body)
@@ -75,7 +71,6 @@ def _error_response(result: ProxyResult) -> JSONResponse:
     if not raw_msg:
         raw_msg = result.error or result.raw_text[:500]
 
-    # Detect batch/token size errors and add a helpful hint
     msg_lower = raw_msg.lower()
     if any(hint in msg_lower for hint in _BATCH_SIZE_HINTS):
         enriched = {
@@ -92,11 +87,9 @@ def _error_response(result: ProxyResult) -> JSONResponse:
         }
         return JSONResponse(content=enriched, status_code=result.status_code)
 
-    # Pass through backend JSON body as-is if available
     if result.body is not None:
         return JSONResponse(content=result.body, status_code=result.status_code)
 
-    # Otherwise build a structured error
     return JSONResponse(
         content={
             "error": {
@@ -220,7 +213,10 @@ async def _proxy_stream(
 # ---------------------------------------------------------------------------
 @router.post("/chat/completions")
 async def chat_completions(body: ChatCompletionRequest, request: Request):
-    model, payload = resolve_model(body.model_dump(exclude_none=True))
+    model, payload = resolve_model(
+        body.model_dump(exclude_none=True),
+        allowed_types={"chat"},
+    )
 
     if payload.get("stream"):
         return StreamingResponse(
@@ -237,7 +233,10 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
 # ---------------------------------------------------------------------------
 @router.post("/completions")
 async def completions(body: CompletionRequest, request: Request):
-    model, payload = resolve_model(body.model_dump(exclude_none=True))
+    model, payload = resolve_model(
+        body.model_dump(exclude_none=True),
+        allowed_types={"completion", "chat"},
+    )
 
     if payload.get("stream"):
         return StreamingResponse(
@@ -254,23 +253,8 @@ async def completions(body: CompletionRequest, request: Request):
 # ---------------------------------------------------------------------------
 @router.post("/embeddings")
 async def embeddings(body: EmbeddingRequest, request: Request):
-    model, payload = resolve_model(body.model_dump(exclude_none=True))
+    model, payload = resolve_model(
+        body.model_dump(exclude_none=True),
+        allowed_types={"embedding"},
+    )
     return await _proxy_json(request, model, "/embeddings", payload)
-
-
-# ---------------------------------------------------------------------------
-# Rerank
-# ---------------------------------------------------------------------------
-@router.post("/rerank")
-async def rerank(body: RerankRequest, request: Request):
-    model, payload = resolve_model(body.model_dump(exclude_none=True))
-    return await _proxy_json(request, model, "/rerank", payload)
-
-
-# ---------------------------------------------------------------------------
-# Score
-# ---------------------------------------------------------------------------
-@router.post("/score")
-async def score(body: ScoreRequest, request: Request):
-    model, payload = resolve_model(body.model_dump(exclude_none=True))
-    return await _proxy_json(request, model, "/score", payload)
