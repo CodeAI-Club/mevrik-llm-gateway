@@ -52,9 +52,47 @@ def _user_key(request: Request) -> str:
     return "__anonymous__"
 
 
+# Keywords that indicate the caller sent an input too large for the backend
+_BATCH_SIZE_HINTS = ("too large", "batch size", "max_num_batched_tokens", "too long", "exceed")
+
+
 def _error_response(result: ProxyResult) -> JSONResponse:
-    """Build a JSON error response from a failed ProxyResult."""
-    # If backend returned valid JSON error body, pass it through as-is
+    """Build a JSON error response from a failed ProxyResult.
+
+    If the backend error looks like a batch/token-size issue, enrich the
+    response with actionable guidance so the caller knows what to fix.
+    """
+    # Extract the raw error message from wherever vLLM put it
+    raw_msg = ""
+    if result.body and isinstance(result.body, dict):
+        err_obj = result.body.get("error", result.body)
+        if isinstance(err_obj, dict):
+            raw_msg = err_obj.get("message", "")
+        elif isinstance(err_obj, str):
+            raw_msg = err_obj
+        if not raw_msg:
+            raw_msg = result.body.get("message", "") or result.body.get("detail", "")
+    if not raw_msg:
+        raw_msg = result.error or result.raw_text[:500]
+
+    # Detect batch/token size errors and add a helpful hint
+    msg_lower = raw_msg.lower()
+    if any(hint in msg_lower for hint in _BATCH_SIZE_HINTS):
+        enriched = {
+            "error": {
+                "message": raw_msg,
+                "type": "input_too_large",
+                "code": result.status_code,
+                "hint": (
+                    "The input exceeds the backend's physical batch size limit. "
+                    "Reduce your chunk/split size before sending to the gateway, "
+                    "or increase --max-num-batched-tokens on the vLLM backend."
+                ),
+            }
+        }
+        return JSONResponse(content=enriched, status_code=result.status_code)
+
+    # Pass through backend JSON body as-is if available
     if result.body is not None:
         return JSONResponse(content=result.body, status_code=result.status_code)
 
