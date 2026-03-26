@@ -25,7 +25,9 @@ from app.stats import RequestStat, tracker
 
 logger = logging.getLogger("llm-gateway")
 
-router = APIRouter(prefix="/v1", tags=["benchmark"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(
+    prefix="/v1", tags=["benchmark"], dependencies=[Depends(verify_api_key)]
+)
 
 _TEST_PROMPT = "Say 'hello' in one sentence."
 
@@ -126,13 +128,16 @@ async def load_test_model(model_id: str, body: LoadTestRequest):
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
     job_id = str(uuid.uuid4())[:8]
-    _store_job(job_id, {
-        "job_id": job_id,
-        "model": model_id,
-        "status": "running",
-        "config": body.model_dump(),
-        "started_at": time.time(),
-    })
+    _store_job(
+        job_id,
+        {
+            "job_id": job_id,
+            "model": model_id,
+            "status": "running",
+            "config": body.model_dump(),
+            "started_at": time.time(),
+        },
+    )
 
     # Fire and forget — runs in the event loop background
     asyncio.create_task(_run_loadtest(job_id, entry, body))
@@ -172,11 +177,20 @@ async def _run_loadtest(job_id: str, entry, body: LoadTestRequest):
                 )
                 await tracker.record("__loadtest__", stat)
 
-                return {"index": idx, "status": resp.status_code, "latency_ms": round(elapsed, 2),
-                        "tokens_out": tokens_out}
+                return {
+                    "index": idx,
+                    "status": resp.status_code,
+                    "latency_ms": round(elapsed, 2),
+                    "tokens_out": tokens_out,
+                }
             except Exception as exc:
                 elapsed = (time.perf_counter() - t0) * 1000
-                return {"index": idx, "status": "error", "latency_ms": round(elapsed, 2), "error": str(exc)}
+                return {
+                    "index": idx,
+                    "status": "error",
+                    "latency_ms": round(elapsed, 2),
+                    "error": str(exc),
+                }
 
     try:
         tasks = [_single(i) for i in range(body.total_requests)]
@@ -192,34 +206,44 @@ async def _run_loadtest(job_id: str, entry, body: LoadTestRequest):
         def _pct(arr: list, p: float) -> float:
             return round(arr[min(int(len(arr) * p), len(arr) - 1)], 2) if arr else 0
 
-        _store_job(job_id, {
-            "job_id": job_id,
-            "model": entry.id,
-            "status": "completed",
-            "config": body.model_dump(),
-            "wall_time_ms": round(total_wall_ms, 2),
-            "succeeded": n,
-            "failed": len(failures),
-            "avg_latency_ms": round(sum(latencies) / n, 2) if n else 0,
-            "min_latency_ms": round(latencies[0], 2) if n else 0,
-            "max_latency_ms": round(latencies[-1], 2) if n else 0,
-            "p50_latency_ms": _pct(latencies, 0.50),
-            "p95_latency_ms": _pct(latencies, 0.95),
-            "p99_latency_ms": _pct(latencies, 0.99),
-            "requests_per_sec": round((n / total_wall_ms) * 1000, 2) if total_wall_ms > 0 else 0,
-            "results": list(results),
-            "completed_at": time.time(),
-        })
-        logger.info("Load test %s completed: %d/%d succeeded", job_id, n, body.total_requests)
+        _store_job(
+            job_id,
+            {
+                "job_id": job_id,
+                "model": entry.id,
+                "status": "completed",
+                "config": body.model_dump(),
+                "wall_time_ms": round(total_wall_ms, 2),
+                "succeeded": n,
+                "failed": len(failures),
+                "avg_latency_ms": round(sum(latencies) / n, 2) if n else 0,
+                "min_latency_ms": round(latencies[0], 2) if n else 0,
+                "max_latency_ms": round(latencies[-1], 2) if n else 0,
+                "p50_latency_ms": _pct(latencies, 0.50),
+                "p95_latency_ms": _pct(latencies, 0.95),
+                "p99_latency_ms": _pct(latencies, 0.99),
+                "requests_per_sec": round((n / total_wall_ms) * 1000, 2)
+                if total_wall_ms > 0
+                else 0,
+                "results": list(results),
+                "completed_at": time.time(),
+            },
+        )
+        logger.info(
+            "Load test %s completed: %d/%d succeeded", job_id, n, body.total_requests
+        )
 
     except Exception as exc:
-        _store_job(job_id, {
-            "job_id": job_id,
-            "model": entry.id,
-            "status": "failed",
-            "error": str(exc),
-            "completed_at": time.time(),
-        })
+        _store_job(
+            job_id,
+            {
+                "job_id": job_id,
+                "model": entry.id,
+                "status": "failed",
+                "error": str(exc),
+                "completed_at": time.time(),
+            },
+        )
         logger.error("Load test %s failed: %s", job_id, exc)
 
 
@@ -248,8 +272,8 @@ async def list_jobs():
 # ---------------------------------------------------------------------------
 @router.get("/stats")
 async def get_stats(
-        user: str = Query("__benchmark__", description="User key to query stats for"),
-        model_id: Optional[str] = Query(None, description="Filter by model ID"),
+    user: str = Query("__benchmark__", description="User key to query stats for"),
+    model_id: Optional[str] = Query(None, description="Filter by model ID"),
 ):
     """Get average token speed and latency stats for a user."""
     return {
@@ -267,7 +291,9 @@ async def list_stat_users():
 
 @router.delete("/stats")
 async def clear_stats(
-        user: Optional[str] = Query(None, description="Clear stats for specific user, or all if omitted"),
+    user: Optional[str] = Query(
+        None, description="Clear stats for specific user, or all if omitted"
+    ),
 ):
     """Clear recorded stats."""
     await tracker.clear(user)

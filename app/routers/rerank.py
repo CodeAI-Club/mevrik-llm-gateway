@@ -29,7 +29,9 @@ from app.stats import RequestStat, tracker
 
 logger = logging.getLogger("llm-gateway")
 
-router = APIRouter(prefix="/v1", tags=["rerank"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(
+    prefix="/v1", tags=["rerank"], dependencies=[Depends(verify_api_key)]
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -53,6 +55,7 @@ _SCORE_TYPES = {"rerank", "score"}
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _user_key(request: Request) -> str:
     """Extract a user identifier from the Authorization header for stats."""
     auth = request.headers.get("authorization", "")
@@ -73,11 +76,11 @@ def _get_batch_size(request: Request) -> int:
 
 
 def _normalize_results(
-        raw_results: List[Dict[str, Any]],
-        documents: list,
-        return_documents: bool,
-        top_n: Optional[int],
-        offset: int = 0,
+    raw_results: List[Dict[str, Any]],
+    documents: list,
+    return_documents: bool,
+    top_n: Optional[int],
+    offset: int = 0,
 ) -> List[Dict[str, Any]]:
     """Normalize backend results into a consistent format.
 
@@ -123,8 +126,8 @@ def _normalize_results(
 
 
 def _merge_batched_results(
-        all_results: List[Dict[str, Any]],
-        top_n: Optional[int],
+    all_results: List[Dict[str, Any]],
+    top_n: Optional[int],
 ) -> List[Dict[str, Any]]:
     """Merge results from multiple batches and re-sort by score descending."""
     # Sort by relevance_score descending
@@ -153,7 +156,13 @@ def _build_rerank_error(result: ProxyResult, model_id: str) -> JSONResponse:
     msg_lower = raw_msg.lower()
 
     # Detect batch/token size errors
-    batch_hints = ("too large", "batch size", "max_num_batched_tokens", "too long", "exceed")
+    batch_hints = (
+        "too large",
+        "batch size",
+        "max_num_batched_tokens",
+        "too long",
+        "exceed",
+    )
     if any(h in msg_lower for h in batch_hints):
         return JSONResponse(
             status_code=result.status_code,
@@ -206,10 +215,10 @@ def _build_rerank_error(result: ProxyResult, model_id: str) -> JSONResponse:
 
 
 async def _record_stat(
-        user_key: str,
-        model_id: str,
-        latency_ms: float,
-        doc_count: int = 0,
+    user_key: str,
+    model_id: str,
+    latency_ms: float,
+    doc_count: int = 0,
 ):
     """Record rerank stats."""
     try:
@@ -228,6 +237,7 @@ async def _record_stat(
 # ---------------------------------------------------------------------------
 # Rerank endpoint
 # ---------------------------------------------------------------------------
+
 
 @router.post("/rerank")
 async def rerank(body: RerankRequest, request: Request):
@@ -260,11 +270,13 @@ async def rerank(body: RerankRequest, request: Request):
 
     doc_count = len(body.documents)
     if doc_count == 0:
-        return JSONResponse(content={
-            "id": f"rerank-{uuid.uuid4().hex[:12]}",
-            "results": [],
-            "meta": {"api_version": {"version": "1"}},
-        })
+        return JSONResponse(
+            content={
+                "id": f"rerank-{uuid.uuid4().hex[:12]}",
+                "results": [],
+                "meta": {"api_version": {"version": "1"}},
+            }
+        )
 
     if doc_count > _MAX_DOCUMENTS:
         raise HTTPException(
@@ -296,11 +308,14 @@ async def rerank(body: RerankRequest, request: Request):
 
         raw_results = (result.body or {}).get("results", [])
         normalized = _normalize_results(
-            raw_results, body.documents, return_documents, body.top_n,
+            raw_results,
+            body.documents,
+            return_documents,
+            body.top_n,
         )
         if body.top_n is not None:
             normalized.sort(key=lambda x: x["relevance_score"], reverse=True)
-            normalized = normalized[:body.top_n]
+            normalized = normalized[: body.top_n]
 
         await _record_stat(user, model.id, elapsed_ms, doc_count)
 
@@ -318,7 +333,9 @@ async def rerank(body: RerankRequest, request: Request):
     # --- Multi-batch: split documents and merge results ---
     logger.info(
         "Rerank batching: %d docs into %d-doc batches for model %s",
-        doc_count, batch_size, model.id,
+        doc_count,
+        batch_size,
+        model.id,
     )
 
     all_results: List[Dict[str, Any]] = []
@@ -327,7 +344,7 @@ async def rerank(body: RerankRequest, request: Request):
     # Create batches
     batches = []
     for i in range(0, doc_count, batch_size):
-        batch_docs = body.documents[i: i + batch_size]
+        batch_docs = body.documents[i : i + batch_size]
         batch_payload = {
             "model": model.backend_model,
             "query": body.query,
@@ -339,7 +356,9 @@ async def rerank(body: RerankRequest, request: Request):
     # Execute batches concurrently (with limited parallelism)
     sem = asyncio.Semaphore(4)  # max 4 concurrent batch requests
 
-    async def _run_batch(offset: int, payload: dict) -> tuple[int, Optional[ProxyResult]]:
+    async def _run_batch(
+        offset: int, payload: dict
+    ) -> tuple[int, Optional[ProxyResult]]:
         async with sem:
             return offset, await forward_safe(model, "/rerank", payload)
 
@@ -364,7 +383,11 @@ async def rerank(body: RerankRequest, request: Request):
 
         raw = (result.body or {}).get("results", [])
         normalized = _normalize_results(
-            raw, body.documents, return_documents, top_n=None, offset=offset,
+            raw,
+            body.documents,
+            return_documents,
+            top_n=None,
+            offset=offset,
         )
         all_results.extend(normalized)
 
@@ -406,7 +429,9 @@ async def rerank(body: RerankRequest, request: Request):
         response_body["meta"]["warnings"] = errors[:5]
         logger.warning(
             "Rerank partial failure: %d/%d batches failed for %s",
-            len(errors), len(batches), model.id,
+            len(errors),
+            len(batches),
+            model.id,
         )
 
     return JSONResponse(content=response_body)
@@ -415,6 +440,7 @@ async def rerank(body: RerankRequest, request: Request):
 # ---------------------------------------------------------------------------
 # Score endpoint (cross-encoder)
 # ---------------------------------------------------------------------------
+
 
 @router.post("/score")
 async def score(body: ScoreRequest, request: Request):

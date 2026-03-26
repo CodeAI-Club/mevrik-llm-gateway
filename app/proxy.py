@@ -167,7 +167,10 @@ async def forward_safe(model: ModelEntry, path: str, body: dict) -> ProxyResult:
     except Exception:
         logger.warning(
             "Non-JSON response from [%s] %s (status %d): %.200s",
-            model.id, url, resp.status_code, raw_text,
+            model.id,
+            url,
+            resp.status_code,
+            raw_text,
         )
 
     if resp.status_code >= 400:
@@ -175,17 +178,24 @@ async def forward_safe(model: ModelEntry, path: str, body: dict) -> ProxyResult:
         detail = ""
         if parsed and isinstance(parsed, dict):
             detail = (
-                    parsed.get("message")
-                    or parsed.get("detail")
-                    or (parsed.get("error", {}).get("message") if isinstance(parsed.get("error"), dict) else "")
-                    or raw_text[:500]
+                parsed.get("message")
+                or parsed.get("detail")
+                or (
+                    parsed.get("error", {}).get("message")
+                    if isinstance(parsed.get("error"), dict)
+                    else ""
+                )
+                or raw_text[:500]
             )
         else:
             detail = raw_text[:500]
 
         logger.warning(
             "Backend error [%s] %s → %d: %s",
-            model.id, url, resp.status_code, detail,
+            model.id,
+            url,
+            resp.status_code,
+            detail,
         )
 
     return ProxyResult(
@@ -195,7 +205,9 @@ async def forward_safe(model: ModelEntry, path: str, body: dict) -> ProxyResult:
     )
 
 
-async def forward_stream(model: ModelEntry, path: str, body: dict) -> AsyncIterator[bytes]:
+async def forward_stream(
+    model: ModelEntry, path: str, body: dict
+) -> AsyncIterator[bytes]:
     """Proxy a streaming request, yielding raw SSE chunks."""
     client = await get_client()
     url = f"{model.backend_url.rstrip('/')}{path}"

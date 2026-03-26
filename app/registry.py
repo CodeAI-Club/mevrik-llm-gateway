@@ -29,7 +29,9 @@ class ModelEntry(BaseModel):
     name: str = Field("", description="Human-readable display name")
     backend_url: str = Field(..., description="vLLM base URL, e.g. http://host:8010/v1")
     backend_model: str = Field(..., description="Actual model name on vLLM")
-    model_type: str = Field("chat", description="chat | completion | embedding | rerank")
+    model_type: str = Field(
+        "chat", description="chat | completion | embedding | rerank"
+    )
     owned_by: str = Field("organization")
     created_at: int = Field(default_factory=lambda: int(time.time()))
 
@@ -93,10 +95,12 @@ class ModelRegistry:
         """
         Saves models to disk using an atomic write to prevent file corruption.
         """
-        temp_filepath = self._filepath.with_suffix('.tmp')
+        temp_filepath = self._filepath.with_suffix(".tmp")
         try:
             # Dump to a temporary file first
-            data = [model.model_dump(exclude_none=True) for model in self._models.values()]
+            data = [
+                model.model_dump(exclude_none=True) for model in self._models.values()
+            ]
             with open(temp_filepath, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
 
@@ -129,7 +133,9 @@ class ModelRegistry:
     async def add(self, data: ModelCreate) -> ModelEntry:
         """Add a new model to the registry."""
         async with self._lock:
-            self._load(force=True)  # Strictly sync to prevent overwriting other worker's changes
+            self._load(
+                force=True
+            )  # Strictly sync to prevent overwriting other worker's changes
 
             if data.id in self._models:
                 raise ValueError(f"Model '{data.id}' already exists")
@@ -179,6 +185,5 @@ class ModelRegistry:
 # Global singleton instance
 # Defaulting to "data" folder in case settings.data_dir isn't explicitly defined
 registry = ModelRegistry(
-    data_dir=getattr(settings, "data_dir", "data"),
-    filename="models.json"
+    data_dir=getattr(settings, "data_dir", "data"), filename="models.json"
 )

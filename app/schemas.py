@@ -57,6 +57,7 @@ class EmbeddingRequest(BaseModel):
 # Rerank schemas — support vLLM, Cohere, and Jina formats
 # ---------------------------------------------------------------------------
 
+
 class RerankRequest(BaseModel):
     """Unified rerank request supporting multiple API conventions.
 
@@ -139,9 +140,17 @@ class RerankRequest(BaseModel):
             payload["top_n"] = self.top_n
 
         # Forward any extra fields the caller sent (future-proofing)
-        extras = self.model_dump(exclude={"model", "query", "documents", "top_n",
-                                          "return_documents", "max_chunks_per_doc"},
-                                 exclude_none=True)
+        extras = self.model_dump(
+            exclude={
+                "model",
+                "query",
+                "documents",
+                "top_n",
+                "return_documents",
+                "max_chunks_per_doc",
+            },
+            exclude_none=True,
+        )
         payload.update(extras)
         return payload
 
@@ -169,8 +178,10 @@ class ScoreRequest(BaseModel):
 # Rerank response schemas (for documentation / normalization)
 # ---------------------------------------------------------------------------
 
+
 class RerankResultItem(BaseModel):
     """Single rerank result."""
+
     index: int
     relevance_score: float
     document: Optional[Dict[str, Any]] = None  # populated when return_documents=True
@@ -180,6 +191,7 @@ class RerankResultItem(BaseModel):
 
 class RerankResponse(BaseModel):
     """Normalized rerank response compatible with Cohere/Jina/vLLM formats."""
+
     id: Optional[str] = None
     results: List[RerankResultItem]
     meta: Optional[Dict[str, Any]] = None

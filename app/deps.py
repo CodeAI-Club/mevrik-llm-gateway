@@ -27,7 +27,7 @@ _ENDPOINT_TYPES: dict[str, set[str]] = {
 
 
 def verify_api_key(
-        credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ):
     """Validate Bearer token against API_KEY from .env."""
     if not settings.api_key:
@@ -38,7 +38,9 @@ def verify_api_key(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def resolve_model(body: dict, allowed_types: Optional[Set[str]] = None) -> tuple[ModelEntry, dict]:
+def resolve_model(
+    body: dict, allowed_types: Optional[Set[str]] = None
+) -> tuple[ModelEntry, dict]:
     """
     Look up model by id, rewrite model field to backend name.
 

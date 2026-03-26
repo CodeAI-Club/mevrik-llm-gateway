@@ -32,7 +32,9 @@ from app.stats import RequestStat, tracker
 
 logger = logging.getLogger("llm-gateway")
 
-router = APIRouter(prefix="/v1", tags=["openai"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(
+    prefix="/v1", tags=["openai"], dependencies=[Depends(verify_api_key)]
+)
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -54,7 +56,13 @@ def _user_key(request: Request) -> str:
 
 
 # Keywords that indicate the caller sent an input too large for the backend
-_BATCH_SIZE_HINTS = ("too large", "batch size", "max_num_batched_tokens", "too long", "exceed")
+_BATCH_SIZE_HINTS = (
+    "too large",
+    "batch size",
+    "max_num_batched_tokens",
+    "too long",
+    "exceed",
+)
 
 
 def _error_response(result: ProxyResult) -> JSONResponse:
@@ -111,12 +119,12 @@ def _extract_usage(data: dict | None) -> tuple[int, int]:
 
 
 async def _record_stat(
-        user_key: str,
-        model_id: str,
-        tokens_in: int,
-        tokens_out: int,
-        latency_ms: float,
-        ttfb_ms: float = 0.0,
+    user_key: str,
+    model_id: str,
+    tokens_in: int,
+    tokens_out: int,
+    latency_ms: float,
+    ttfb_ms: float = 0.0,
 ):
     """Fire-and-forget stat recording."""
     try:
@@ -136,10 +144,10 @@ async def _record_stat(
 # Non-streaming proxy
 # ---------------------------------------------------------------------------
 async def _proxy_json(
-        request: Request,
-        model: ModelEntry,
-        path: str,
-        payload: dict,
+    request: Request,
+    model: ModelEntry,
+    path: str,
+    payload: dict,
 ) -> JSONResponse:
     """Proxy a non-streaming request, record stats, return response as-is."""
     user = _user_key(request)
@@ -152,8 +160,11 @@ async def _proxy_json(
     if not result.ok:
         logger.warning(
             "Proxy error [%s] %s → %d (%s) %.0fms",
-            model.id, path, result.status_code,
-            result.error or "backend error", elapsed_ms,
+            model.id,
+            path,
+            result.status_code,
+            result.error or "backend error",
+            elapsed_ms,
         )
         return _error_response(result)
 
@@ -167,10 +178,10 @@ async def _proxy_json(
 # Streaming proxy
 # ---------------------------------------------------------------------------
 async def _proxy_stream(
-        request: Request,
-        model: ModelEntry,
-        path: str,
-        payload: dict,
+    request: Request,
+    model: ModelEntry,
+    path: str,
+    payload: dict,
 ):
     """Proxy a streaming SSE request, wrap errors into SSE events."""
     user = _user_key(request)
@@ -191,15 +202,21 @@ async def _proxy_stream(
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "Stream error [%s] %s after %.0fms (%d chunks): %s",
-            model.id, path, elapsed_ms, chunk_count, exc,
+            model.id,
+            path,
+            elapsed_ms,
+            chunk_count,
+            exc,
         )
-        err = json.dumps({
-            "error": {
-                "message": str(exc),
-                "type": "proxy_error",
-                "code": 502,
+        err = json.dumps(
+            {
+                "error": {
+                    "message": str(exc),
+                    "type": "proxy_error",
+                    "code": 502,
+                }
             }
-        })
+        )
         yield f"data: {err}\n\n".encode()
         yield b"data: [DONE]\n\n"
         return

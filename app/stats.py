@@ -65,7 +65,9 @@ class StatsTracker:
             for user_key, records in raw.items():
                 self._data[user_key] = [RequestStat(**r) for r in records]
             total = sum(len(v) for v in self._data.values())
-            logger.info("Loaded %d stat record(s) for %d user(s)", total, len(self._data))
+            logger.info(
+                "Loaded %d stat record(s) for %d user(s)", total, len(self._data)
+            )
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning("Corrupt stats file, resetting: %s", exc)
 
@@ -76,8 +78,7 @@ class StatsTracker:
 
     def _write(self):
         data = {
-            user: [asdict(r) for r in records]
-            for user, records in self._data.items()
+            user: [asdict(r) for r in records] for user, records in self._data.items()
         }
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -108,7 +109,7 @@ class StatsTracker:
         # Trim only when well over limit (amortised)
         if len(bucket) > self._max + 100:
             async with self._lock:
-                self._data[user_key] = bucket[-self._max:]
+                self._data[user_key] = bucket[-self._max :]
 
     # -- read (no lock, serves from memory) --
 
@@ -147,7 +148,9 @@ class StatsTracker:
             "total_tokens_out": sum(r.tokens_out for r in records),
             "avg_latency_ms": round(sum(latencies) / n, 2),
             "avg_ttfb_ms": round(sum(r.ttfb_ms for r in records) / n, 2),
-            "avg_tokens_per_sec": round(sum(tps_values) / len(tps_values), 2) if tps_values else 0,
+            "avg_tokens_per_sec": round(sum(tps_values) / len(tps_values), 2)
+            if tps_values
+            else 0,
             "p50_latency_ms": _pct(latencies, 0.50),
             "p95_latency_ms": _pct(latencies, 0.95),
             "p99_latency_ms": _pct(latencies, 0.99),

@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.deps import verify_api_key
 from app.registry import ModelCreate, ModelUpdate, registry
 
-router = APIRouter(prefix="/v1/models", tags=["models"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(
+    prefix="/v1/models", tags=["models"], dependencies=[Depends(verify_api_key)]
+)
 
 
 @router.get("")
@@ -15,15 +17,17 @@ async def list_models():
     """OpenAI-compatible GET /v1/models."""
     data = []
     for m in registry.list_all():
-        data.append({
-            "id": m.id,
-            "object": "model",
-            "created": m.created_at,
-            "owned_by": m.owned_by,
-            "name": m.name,
-            "model_type": m.model_type,
-            "backend_url": m.backend_url,
-        })
+        data.append(
+            {
+                "id": m.id,
+                "object": "model",
+                "created": m.created_at,
+                "owned_by": m.owned_by,
+                "name": m.name,
+                "model_type": m.model_type,
+                "backend_url": m.backend_url,
+            }
+        )
     return {"object": "list", "data": data}
 
 
